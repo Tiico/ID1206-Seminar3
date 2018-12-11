@@ -11,10 +11,15 @@ void *test(void *arg){
   while (loop > 0) {
     if (flag == id) {
       printf("thread %d: %d\n",id, loop);
+      for(int i = 0; i < 100000; i++) {
+        if(i < 1)
+          i++;
+      }
       loop--;
       flag = (id + 1) % numThreads;
       green_cond_signal(&cond);
     }else{
+      green_cond_signal(&cond);
       green_cond_wait(&cond);
     }
   }
