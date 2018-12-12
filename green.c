@@ -110,7 +110,7 @@ void green_cond_wait(green_cond_t* cond){
   green_t* susp = running;
   running = dequeue(cond);
 
-  printf("%p , %p\n",susp , running );
+  //printf("%p , %p\n",susp , running );
   swapcontext(susp->context, running->context);
   sigprocmask(SIG_UNBLOCK, &block , NULL);
 }
@@ -269,9 +269,10 @@ int green_mutex_unlock(green_mutex_t *mutex){
 void printReady(){
   printf("\n");
   printf("============ Ready list ============\n");
+  int i = 0;
   green_t *first = readylist.first;
   while (first != NULL) {
-    printf(" %p\n", first);
+    printf("[%d]: %p\n",i++, first);
     first = first->next;
   }
   printf("====================================\n");
