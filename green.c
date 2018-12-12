@@ -20,9 +20,6 @@ static green_t *running = &main_green;
 static void init() __attribute__((constructor));
 
 void timer_handler(int sig);
-void green_thread();
-void enqueue(green_t* thread);
-green_t* dequeue();
 
 struct readyList {
   struct green_t *first;
@@ -50,6 +47,11 @@ void init(){
 	setitimer(ITIMER_VIRTUAL,&period,NULL);
 }
 
+void timer_handler(int sig){
+  //printf("interrupt!\n");
+  green_yield();
+}
+
 void enqueue(green_t *thread){
   if (readylist.first == NULL) {
     readylist.first = thread;
@@ -58,21 +60,6 @@ void enqueue(green_t *thread){
     readylist.last->next = thread;
     readylist.last = thread;
   }
-}
-
-struct green_t* dequeue(){
-  green_t *next = readylist.first;
-  readylist.first = next->next;
-  if (next == NULL) {
-    next = &main_green;
-  }
-  next->next = NULL;
-  return next;
-}
-
-void timer_handler(int sig){
-  printf("interrupt!\n");
-  green_yield();
 }
 
 void condEnqueue(green_cond_t* cond, green_t* thread){
@@ -85,12 +72,30 @@ void condEnqueue(green_cond_t* cond, green_t* thread){
   }
 }
 
+struct green_t* dequeue(){
+  if (readylist.first == NULL) {
+    printf("No ready threads left, quitting...\n");
+    return &main_green;
+  }
+  green_t *first = readylist.first;
+
+  if (readylist.first->next == NULL) {
+    readylist.first = NULL;
+    readylist.last = NULL;
+    return first;
+  }
+  readylist.first = readylist.first->next;
+  first->next = NULL;
+  return first;
+}
+
 struct green_t* condDequeue(green_cond_t* cond){
   green_t *current = cond->first;
     if (current != NULL) {
       cond->first = current->next;
       current->next = NULL;
     }
+
   return current;
 }
 
@@ -104,6 +109,8 @@ void green_cond_wait(green_cond_t* cond){
   condEnqueue(cond, running);
   green_t* susp = running;
   running = dequeue(cond);
+
+  printf("%p , %p\n",susp , running );
   swapcontext(susp->context, running->context);
   sigprocmask(SIG_UNBLOCK, &block , NULL);
 }
@@ -200,48 +207,73 @@ int green_create(green_t *new, void *(*fun)(void*), void *arg){
   return 0;
 }
 
-// void mutexEnqueue(green_mutex_t *mutex, green_t *thread){
-//   if (mutex->susp == NULL) {
-//     mutex->susp = thread;
-//   }else{
-//     green_t *current = mutex->susp;
-//     while (current->next != NULL) {
-//         current = current->next;
-//     }
-//     current->next = thread;
-//
-//   }
-// }
+void mutexEnqueue(green_mutex_t *mutex, green_t *thread){
+  if (mutex->susp == NULL) {
+    mutex->susp = thread;
+  }else{
+    green_t *current = mutex->susp;
+    while (current->next != NULL) {
+        current = current->next;
+    }
+    current->next = thread;
 
-// int green_mutex_init(green_mutex_t *mutex){
-//   mutex->taken = 0;
-//   mutex->susp = NULL;
-// }
-//
-// int green_mutex_lock(green_mutex_t *mutex){
-//   sigprocmask(SIG_BLOCK, &block , NULL);
-//
-//   green_t *susp = running;
-//   while (mutex->taken) {
-//     mutexEnqueue(mutex, susp);
-//
-//     green_t* next = dequeue();
-//     running = next;
-//     swapcontext(susp->context, next->context);
-//   }
-//   mutex->taken = 1;
-//   sigprocmask(SIG_UNBLOCK, &block , NULL);
-//   return 0;
-// }
-//
-// int green_mutex_unlock(green_mutex_t *mutex){
-//   sigprocmask(SIG_BLOCK, &block , NULL);
-//   //move suspended threads to ready queue
-//   while (mutex->susp->next != NULL) {
-//     enqueue(mutex->susp);
-//   }
-//   mutex->taken = 0;
-//
-//   sigprocmask(SIG_UNBLOCK, &block , NULL);
-//   return 0;
-// }
+  }
+}
+
+int green_mutex_init(green_mutex_t *mutex){
+  mutex->taken = 0;
+  mutex->susp = NULL;
+}
+
+int green_mutex_lock(green_mutex_t *mutex){
+  sigprocmask(SIG_BLOCK, &block , NULL);
+
+  green_t *susp = running;
+  while (mutex->taken) {
+    mutexEnqueue(mutex, susp);
+
+    green_t* next = dequeue();
+    running = next;
+    swapcontext(susp->context, next->context);
+  }
+  mutex->taken = 1;
+  sigprocmask(SIG_UNBLOCK, &block , NULL);
+  return 0;
+}
+
+int green_mutex_unlock(green_mutex_t *mutex){
+  sigprocmask(SIG_BLOCK, &block , NULL);
+  //move suspended threads to ready queue
+  green_t *susp_threads = mutex->susp;
+  if (susp_threads != NULL) {
+    enqueue(susp_threads);
+    mutex->susp = mutex->susp->next;
+    // susp_threads = susp_threads->next;
+    // mutex->susp = NULL;
+  }
+
+  // green_t *susp_threads = mutex->susp;
+  // while (susp_threads != NULL) {
+  //   //printf("Adding to ready queue\n");
+  //   enqueue(susp_threads);
+  //   susp_threads = susp_threads->next;
+  //   printf("next susp_threads: %p\n", susp_threads);
+  //   susp_threads->next = NULL;  //Seq fault since susp_threads is null and thus doesn't have a next pointer
+  // }
+  mutex->taken = 0;
+
+  sigprocmask(SIG_UNBLOCK, &block , NULL);
+  return 0;
+}
+
+void printReady(){
+  printf("\n");
+  printf("============ Ready list ============\n");
+  green_t *first = readylist.first;
+  while (first != NULL) {
+    printf(" %p\n", first);
+    first = first->next;
+  }
+  printf("====================================\n");
+  printf("\n");
+}
