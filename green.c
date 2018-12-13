@@ -14,19 +14,11 @@
 static sigset_t block;
 static ucontext_t main_cntx = {0};
 static green_t main_green = {&main_cntx, NULL, NULL, NULL, NULL, FALSE};
-
 static green_t *running = &main_green;
 
 static void init() __attribute__((constructor));
 
 void timer_handler(int sig);
-
-struct readyList {
-  struct green_t *first;
-  struct green_t *last;
-};
-
-struct readyList readylist = {NULL};
 
 void init(){
   getcontext(&main_cntx);
@@ -52,75 +44,67 @@ void timer_handler(int sig){
   green_yield();
 }
 
-void enqueue(green_t *thread){
-  if (readylist.first == NULL) {
-    readylist.first = thread;
-    readylist.last = thread;
+void runNext(){
+    dequeue(&running);
+}
+
+void enqueue(green_t **queue, green_t *thread){
+  green_t *currentQ = *queue;
+  if (currentQ == NULL) {
+    *queue = thread;
   }else{
-    readylist.last->next = thread;
-    readylist.last = thread;
-  }
-}
-
-void condEnqueue(green_cond_t* cond, green_t* thread){
-  if (cond->first == NULL) {
-    cond->first = thread;
-    cond->last = thread;
-  }else{
-    cond->last->next = thread;
-    cond->last = thread;
-  }
-}
-
-struct green_t* dequeue(){
-  if (readylist.first == NULL) {
-    printf("No ready threads left, quitting...\n");
-    return &main_green;
-  }
-  green_t *first = readylist.first;
-
-  if (readylist.first->next == NULL) {
-    readylist.first = NULL;
-    readylist.last = NULL;
-    return first;
-  }
-  readylist.first = readylist.first->next;
-  first->next = NULL;
-  return first;
-}
-
-struct green_t* condDequeue(green_cond_t* cond){
-  green_t *current = cond->first;
-    if (current != NULL) {
-      cond->first = current->next;
-      current->next = NULL;
+    while(currentQ->next != NULL){
+      currentQ = currentQ->next;
     }
+    currentQ->next = thread;
+  }
+}
 
-  return current;
+struct green_t* dequeue(green_t **queue){
+  green_t *dequeued = *queue;
+  if (dequeued != NULL) {
+    *queue = dequeued->next;
+    dequeued->next = NULL;
+  }
+  return dequeued;
 }
 
 void green_cond_init(green_cond_t* cond){
-  cond->first = NULL;
-  cond->last = NULL;
+  cond->suspThreads = NULL;
 }
 
-void green_cond_wait(green_cond_t* cond){
-  sigprocmask(SIG_BLOCK, &block , NULL);
-  condEnqueue(cond, running);
-  green_t* susp = running;
-  running = dequeue(cond);
 
-  //printf("%p , %p\n",susp , running );
+int green_cond_wait(green_cond_t* cond, green_mutex_t* mutex){
+  sigprocmask(SIG_BLOCK, &block , NULL);
+  green_t *susp = running;
+  enqueue(&(cond->suspThreads), susp);
+  //printf("reee\n" );
+
+  if(mutex != NULL) {
+    mutex->taken = 0;
+    enqueue(&running, mutex->susp);
+    mutex->susp = NULL;
+  }
+  runNext();
   swapcontext(susp->context, running->context);
+
+  if (mutex != NULL) {
+    while (mutex->taken) { //true: suspending, false: takes lock
+      green_t* susp = running;
+      enqueue(&(mutex->susp), susp);
+      runNext();
+      swapcontext(susp->context, running->context);
+    }
+    mutex->taken = 1;
+  }
   sigprocmask(SIG_UNBLOCK, &block , NULL);
+  return 0;
 }
 
 void green_cond_signal(green_cond_t* cond){
   sigprocmask(SIG_BLOCK, &block , NULL);
-  green_t* signalled = condDequeue(cond);
-  if (signalled != NULL) {
-    enqueue(signalled);
-  }
+  green_t* signalled = dequeue(&cond->suspThreads);
+  enqueue(&running, signalled);
   sigprocmask(SIG_UNBLOCK, &block , NULL);
 }
 
@@ -133,33 +117,30 @@ void green_thread() {
   //place waiting (joining) thread in ready queue
   sigprocmask(SIG_BLOCK, &block , NULL);
   if (this->join != NULL) {
-    enqueue(this->join);
+    enqueue(&running, this->join);
   }
+  sigprocmask(SIG_UNBLOCK, &block , NULL);
   //free allocated memory structure
   free(this->context->uc_stack.ss_sp);
   free(this->context);
   //we're a zombie
   this->zombie = 1;
   //find the next thread to run
-  green_t *next = dequeue();
-
-  running = next;
-  setcontext(next->context);
+  sigprocmask(SIG_BLOCK, &block , NULL);
+  runNext();
+  sigprocmask(SIG_UNBLOCK, &block , NULL);
+  setcontext(running->context);
 }
 
 int green_yield(){
   sigprocmask(SIG_BLOCK, &block , NULL);
   green_t *susp = running;
   //add susp to ready queue
-  enqueue(susp);
+  enqueue(&running, susp);
   //select the next thread for execution
-  green_t *next = dequeue();
-  if (next == NULL) {
-    next = &main_green;
-  }
+  runNext();
 
-  running = next;
-  swapcontext(susp->context, next->context);
+  swapcontext(susp->context, running->context);
   sigprocmask(SIG_UNBLOCK, &block , NULL);
   return 0;
 }
@@ -171,13 +152,20 @@ int green_join(green_t *thread){
   green_t *susp = running;
   sigprocmask(SIG_BLOCK, &block , NULL);
   //add to waiting threads
-  thread->join = susp;
+  if (thread->join == NULL) {
+    thread->join = susp;
+  }else{
+    green_t *waitingThread = thread->join;
+      while (waitingThread->next != NULL) {
+        waitingThread = waitingThread->next;
+      }
+      waitingThread->next = susp;
+  }
 
   //select the next thread for execution
-  green_t *next = dequeue();
+  runNext();
 
-  running = next;
-  swapcontext(susp->context, next->context);
+  swapcontext(susp->context, running->context);
   sigprocmask(SIG_UNBLOCK, &block , NULL);
   //SUSP RESUME
   return 0;
@@ -202,22 +190,9 @@ int green_create(green_t *new, void *(*fun)(void*), void *arg){
 
   //TODO: add new to ready queue
   sigprocmask(SIG_BLOCK, &block , NULL);
-  enqueue(new);
+  enqueue(&running, new);
   sigprocmask(SIG_UNBLOCK, &block , NULL);
   return 0;
-}
-
-void mutexEnqueue(green_mutex_t *mutex, green_t *thread){
-  if (mutex->susp == NULL) {
-    mutex->susp = thread;
-  }else{
-    green_t *current = mutex->susp;
-    while (current->next != NULL) {
-        current = current->next;
-    }
-    current->next = thread;
-
-  }
 }
 
 int green_mutex_init(green_mutex_t *mutex){
@@ -227,14 +202,11 @@ int green_mutex_init(green_mutex_t *mutex){
 
 int green_mutex_lock(green_mutex_t *mutex){
   sigprocmask(SIG_BLOCK, &block , NULL);
-
   green_t *susp = running;
   while (mutex->taken) {
-    mutexEnqueue(mutex, susp);
-
-    green_t* next = dequeue();
-    running = next;
-    swapcontext(susp->context, next->context);
+    enqueue(&(mutex->susp), susp);
+    runNext();
+    swapcontext(susp->context, running->context);
   }
   mutex->taken = 1;
   sigprocmask(SIG_UNBLOCK, &block , NULL);
@@ -244,22 +216,8 @@ int green_mutex_lock(green_mutex_t *mutex){
 int green_mutex_unlock(green_mutex_t *mutex){
   sigprocmask(SIG_BLOCK, &block , NULL);
   //move suspended threads to ready queue
-  green_t *susp_threads = mutex->susp;
-  if (susp_threads != NULL) {
-    enqueue(susp_threads);
-    mutex->susp = mutex->susp->next;
-    // susp_threads = susp_threads->next;
-    // mutex->susp = NULL;
-  }
-
-  // green_t *susp_threads = mutex->susp;
-  // while (susp_threads != NULL) {
-  //   //printf("Adding to ready queue\n");
-  //   enqueue(susp_threads);
-  //   susp_threads = susp_threads->next;
-  //   printf("next susp_threads: %p\n", susp_threads);
-  //   susp_threads->next = NULL;  //Seq fault since susp_threads is null and thus doesn't have a next pointer
-  // }
+  enqueue(&running, mutex->susp);
+  mutex->susp = NULL;
   mutex->taken = 0;
 
   sigprocmask(SIG_UNBLOCK, &block , NULL);
@@ -270,11 +228,38 @@ void printReady(){
   printf("\n");
   printf("============ Ready list ============\n");
   int i = 0;
-  green_t *first = readylist.first;
+  green_t *first = running;
   while (first != NULL) {
     printf("[%d]: %p\n",i++, first);
-    first = first->next;
+    first = running->next;
   }
   printf("====================================\n");
   printf("\n");
 }
+
+// void printMutex(green_mutex_t* mutex){
+//   printf("\n");
+//   printf("============ Mutex list ============\n");
+//   int i = 0;
+//
+//   green_t *first = mutex->susp;
+//   while (first != NULL) {
+//     printf("[%d]: %p\n",i++, first);
+//     first = first->next;
+//   }
+//   printf("====================================\n");
+//   printf("\n");
+// }
+//
+// void printCond(green_cond_t* cond){
+//   printf("\n");
+//   printf("============ Cond List  ============\n");
+//   int i = 0;
+//   green_t *first = cond->first;
+//   while (first != NULL) {
+//     printf("[%d]: %p\n",i++, first);
+//     first = first->next;
+//   }
+//   printf("====================================\n");
+//   printf("\n");
+// }

@@ -10,8 +10,7 @@ typedef struct green_t{
 }green_t;
 
 typedef struct green_cond_t{
-  struct green_t* first;
-  struct green_t* last;
+  struct green_t* suspThreads;
 }green_cond_t;
 
 typedef struct green_mutex_t{
@@ -28,7 +27,8 @@ int green_yield();
 int green_join(green_t *thread);
 
 void green_cond_init(green_cond_t*);
-void green_cond_wait(green_cond_t*);
+int green_cond_wait(green_cond_t*, green_mutex_t* mutex);
 void green_cond_signal(green_cond_t*);
 
+struct green_t* dequeue(green_t **queue);
 void printReady();
