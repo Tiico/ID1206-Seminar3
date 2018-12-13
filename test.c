@@ -22,11 +22,6 @@ void *testTimer(void *arg){
 		}
 	}
 }
-/**
-The program falls short without the signal before the wait.
-With the signal on the condition before the wait the program works
-as intended.
-**/
 
 void *testStd(void *arg){
 	int i = *(int*)arg;
@@ -51,16 +46,13 @@ void *testSharedResource(void* arg) {
   }
 }
 
-/**
-Producer consumer for testing the new green_cond_wait() function
-**/
 int buffer = 0;
 int productions;
 green_cond_t full, empty;
 void produce() {
   for(int i = 0; i < productions; i++) {
     green_mutex_lock(&mutex);
-    while(buffer == 1){ // wait for consumer before producing more
+    while(buffer == 1){
       green_cond_wait(&empty, &mutex);
   	}
     buffer++;
@@ -73,7 +65,7 @@ void produce() {
 void consume() {
   for(int i = 0; i < productions/(numThreads-1); i++) {
     green_mutex_lock(&mutex);
-    while(buffer == 0){ // wait for producer before consuming
+    while(buffer == 0){
       green_cond_wait(&full, &mutex);
   	}
     buffer--;
@@ -84,16 +76,16 @@ void consume() {
 }
 void* testConsumerProducer(void* arg) {
   int id = *(int*)arg;
-  if(id == 0) { // producer
+  if(id == 0) {
     produce();
-  } else { // consumer
+  } else {
     consume();
   }
 
 }
 
 int main(){
-	productions = 100 * (numThreads-1); // Must be multiple of (numThreads-1)
+	productions = 100 * (numThreads-1);
   	green_cond_init(&cond);
   	green_cond_init(&full);
   	green_cond_init(&empty);
@@ -123,7 +115,6 @@ int main(){
 	printf("Thread nr %d done\n", a2);
 	green_join(&g3);
 	printf("Thread nr %d done\n\n", a3);
-	//printf("count is %d\n", counter);
 	printf("done\n");
 	return 0;
 }
